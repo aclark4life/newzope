@@ -1,0 +1,588 @@
+#!/usr/bin/env python
+"""Plone instance manager
+
+Generates/manages plone instances.
+
+Usage: newzope [options] [instance] [products]
+
+Options:
+  -h, --help                    show this help.
+  --add                         add a plone site.
+  --backup                      backup instance. 
+  --checkout=[repository]       checkout from repository.
+  --cleanpyc                    remove stale byte code.
+  --create                      create a zope instance.
+  --fg                          run a zope instance in the foreground.
+  --link                        symbolic link add-on products to instance.
+  --list                        list instances in instance_home.
+  --list-modules=[repository]   list modules in repository.
+  --list-products               list products in add-on product directories.
+  --open                        open instance in browser (Mac OS X only).
+  --pack                        pack database.
+  --plone-version=[version]     specify plone version to create.
+  --remove                      remove instance.
+  --remove-module               remove module from (local) repository.
+  --restart                     restart instance.
+  --start                       start instance.
+  --stop                        stop instance.
+  --update-instance             update instance ('svn up').
+  --update-module=[repository]  update modules in the (local) repository.
+
+Examples:
+
+sudo newzope --create --plone-version=2.5.3 a b c
+sudo newzope --link a PloneFormGen TALESField TemplateFields PythonField
+sudo newzope --link b Quills plonetrackback basesyndication fatsyndication RPCAuth
+sudo newzope --add a b c
+
+"""
+__author__ = "Alex Clark (aclark@aclark.net)"
+__version__ = "0.1"
+__date__ = "$Date$"
+__copyright__ = "Copyright (c) 2007 Alex Clark"
+__license__ = "GPL"
+
+import os, sys, getopt, re, commands, random, fnmatch
+
+default_plone_version = '3.0.2'
+do_random = False
+sandbox = '/var/zope/sandbox'
+instance_home = sandbox + '/instances'
+plone_home = sandbox + '/plone_home'
+software_home = sandbox + '/software_home'
+sys_user = os.environ['USER']
+sys_group = os.environ['USER']
+zope_user = 'admin'
+zope_pass = 'admin'
+products = sandbox + '/products'
+repos = {
+    'archetypes': 
+        {   'url': 'https://svn.plone.org/svn/archetypes', 
+            'dir': products },
+
+    'collective': 
+        {   'url': 'https://svn.plone.org/svn/collective', 
+            'dir': products },
+
+    'plone': 
+        {   'url': 'https://svn.plone.org/svn/plone', 
+            'dir': products },
+}
+version_map = {
+    '2.0.5': {
+        'software_home': software_home + '/Zope-2.8.8-final-with-Python-2.4.4/',
+        'plone_home': plone_home + '/Plone-2.0.5/',
+        },
+    '2.1.4': {
+        'software_home': software_home + '/Zope-2.9.8-final-with-Python-2.4.4/',
+        'plone_home': plone_home + '/Plone-2.1.4/',
+        },
+    '2.5.4': {
+        'software_home': software_home + '/Zope-2.9.8-final-with-Python-2.4.4/',
+        'plone_home': plone_home + '/Plone-2.5.4-final/',
+        },
+    '3.0.2': {
+        'software_home': software_home + '/Zope-2.10.4-final/',
+        'plone_home': plone_home + '/Plone-3.0.2/Products/',
+        'python_libs': plone_home + '/Plone-3.0.2/lib/python/',
+        },
+}
+
+actions = { 
+    'add_plone_site': False, 
+    'backup': False, 
+    'checkout': False, 
+    'cleanpyc': False, 
+    'create': False, 
+    'foreground': False,
+    'link': False,
+    'list_instances': False,
+    'list_repo': False,
+    'list_products': False,
+    'openbrowser': False, 
+    'pack': False, 
+    'remove': False, 
+    'remove_module': False, 
+    'restart': False, 
+    'start': False, 
+    'stop': False, 
+    'update_instance': False, 
+    'update_module': False, 
+}
+
+cut_and_paste = """\
+from Testing.makerequest import makerequest ; app=makerequest(app) ; import AccessControl; AccessControl.SecurityManagement.newSecurityManager(None, AccessControl.SpecialUsers.system)
+"""
+
+add_plone_site = """\
+import transaction
+from Testing.makerequest import makerequest
+from AccessControl.SecurityManagement import newSecurityManager
+acl_users = app.acl_users
+user = acl_users.getUser('%s')
+user = user.__of__(acl_users)
+newSecurityManager(None, user)
+app=makerequest(app)
+app.manage_addProduct['CMFPlone'].addPloneSite('%s',create_userfolder=1)
+transaction.commit()
+"""
+add_plone_site_2_1_4 = """\
+import transaction
+from Testing.makerequest import makerequest
+from AccessControl.SecurityManagement import newSecurityManager
+acl_users = app.acl_users
+user = acl_users.getUser('%s')
+user = user.__of__(acl_users)
+newSecurityManager(None, user)
+app=makerequest(app)
+app.manage_addProduct['CMFPlone'].manage_addSite('%s',create_userfolder=1)
+transaction.commit()
+"""
+pack_database = """\
+from AccessControl.SecurityManagement import newSecurityManager
+acl_users = app.acl_users
+user = acl_users.getUser('%s')
+user = user.__of__(acl_users)
+newSecurityManager(None, user)
+main = app.Control_Panel.Database['main']
+main.manage_pack(days=1)
+"""
+
+# When listing sandbox instances, don't show these directories.
+listdir_ignore= [
+    '.DS_Store',
+]
+
+separator = """\
+===============================================================================\
+"""
+
+def backup(args,plone_version):
+    for instance in args:
+        if os.path.isdir ('%s' % instance_home + '/' + instance):
+            try:
+                os.putenv('PYTHONPATH', version_map[plone_version]['software_home'] + 'lib/python')
+                os.system('%s %s -B -v -r %s -f %s' % (
+                    'python',
+                    version_map[plone_version]['software_home'] + 'bin/repozo.py',
+                    instance_home + '/' + instance + '/var', 
+                    instance_home + '/' + instance + '/var/Data.fs', 
+                    ))
+            except:
+                raise Exception
+        else:
+            print 'No such instance.'
+
+def cleanpyc():
+    print 'This may take a while...'
+    os.system('find %s -name *.pyc | xargs rm -v' % instance_home)
+
+def create_instance_zope(instance, plone_version, zeo_port):
+    os.system('%s %s:%s' % (
+        version_map[plone_version]['software_home'] +
+        'bin/mkzopeinstance.py' +
+        ' -d ' + instance_home + '/' + instance +
+        ' -u', zope_user,zope_pass))
+
+def create_instance_zeo(instance, plone_version, zeo_port):
+    os.system('%s %s %s' % (
+        version_map[plone_version]['software_home'] + 'bin/mkzeoinstance.py', 
+        instance_home + '/' + instance, 
+        zeo_port))
+
+def remove_instance(instance):
+    if os.path.isdir ('%s' % instance_home + '/' + instance):
+        os.system('%s %s' % ( 'rm -vrf', instance_home + '/' + instance))
+    else:
+        print 'No such instance: %s.' % instance
+
+def remove_module(args):
+    for p in args:
+        if os.path.isdir ('%s' % products + '/' + p):
+            os.system('%s %s' % ('rm -vrf', products + '/' + p))
+        else:
+            print 'No such module: %s.' % p
+
+def config_instance(instance, plone_version, zope_port, zeo_port):
+    os.system('%s %s' % ('rm', instance_home + '/' + instance + '/etc/zope.conf'))
+    os.system('%s' %
+        (version_map[plone_version]['software_home'] + 'bin/copyzopeskel.py' +
+        ' -s ' + version_map[plone_version]['software_home'] + 'skel' +
+        ' -t ' + instance_home + '/' + instance +
+#        ' -u ' + sys_user +
+#        ' -g ' + sys_group +
+        ' --replace=INSTANCE_HOME:' + instance_home + '/' + instance +
+        ' --replace=ZOPE_HOME:' + version_map[plone_version]['software_home'] +
+        ' --replace=8080:' + zope_port +
+        ' --replace=8100:' + zeo_port +
+        ' --replace=chrism:' + sys_user))
+
+def link_plone_products(instance, plone_version):
+    if plone_version == default_plone_version:
+        for p in os.listdir(version_map[plone_version]['plone_home']):
+            os.system('%s %s %s' % ('ln -vsf', 
+                version_map[plone_version]['plone_home'] + p, 
+                instance_home + '/' + instance + '/Products'))
+        for l in os.listdir(version_map[plone_version]['python_libs']):
+            os.system('%s %s %s' % ('ln -vsf',
+                version_map[plone_version]['python_libs'] +l, 
+                instance_home + '/' + instance + '/lib/python'))
+    else:
+        for p in os.listdir(version_map[plone_version]['plone_home']):
+            os.system('%s %s %s' % ('ln -vsf',
+                version_map[plone_version]['plone_home'] +p, 
+                instance_home + '/' + instance + '/Products'))
+
+def link_addon_products(instance, product):
+    for d in addon_product_dirs:
+        for p in all_files(d):
+            pname = (p.split('/')).pop()
+            if pname == product:
+                os.system('%s %s %s' % ('ln -vsf', p, instance_home + '/' + instance +
+                    '/Products' ))
+
+def list_repo(repo):
+    try:
+        os.system('svn list %s' % repos[repo]['url'])
+    except: 
+        print "No such repo: %s." % repo
+
+def checkout(args,repo):
+    for product in args:
+        try:
+            os.system('svn co %s %s' % (
+                repos[repo]['url'] + '/' + product + '/trunk',
+                repos[repo]['dir'] + '/' + product))
+        except: 
+            print "No such module: %s." % product
+
+def list_instances():
+    print 'instance_home: ' + instance_home
+    print separator
+    for i in os.listdir(instance_home):
+        if i not in listdir_ignore:
+            print i
+    print '\n'
+
+def list_products():
+    print products + ':'
+    print separator
+    for p in os.listdir(products):
+        print p
+    print '\n'
+
+def getPortNumbers():
+    if do_random:
+        r = random.randrange(100,600)
+        zeo = str(r) + '00'
+        zope = str(r) + '80'
+        return zope, zeo
+    else:
+        zeo = '8100'
+        zope = '8080'
+        return zope, zeo
+
+def start_instance(instance):
+#    os.system('%s' % (instance_home + '/' + instance + '/bin/zeoctl start'))
+    os.system('%s' % (instance_home + '/' + instance + '/bin/zopectl start'))
+
+def stop_instance(instance):
+#    os.system('%s' % (instance_home + '/' + instance + '/bin/zeoctl stop'))
+    os.system('%s' % (instance_home + '/' + instance + '/bin/zopectl stop'))
+
+def restart_instance(instance):
+#    os.system('%s' % (instance_home + '/' + instance + '/bin/zeoctl restart'))
+    os.system('%s' % (instance_home + '/' + instance + '/bin/zopectl restart'))
+
+def foreground_instance(instance):
+#    os.system('%s' % (instance_home + '/' + instance + '/bin/zeoctl start'))
+    os.system('%s' % (instance_home + '/' + instance + '/bin/zopectl fg'))
+
+def change_permissions(instance):
+    os.system('%s %s:%s %s/%s' % ('chown -vR', sys_user, sys_group, 
+                                                instance_home, instance))
+
+def addPloneSite(args,plone_version):
+    for instance in args:
+        if os.path.isdir ('%s' % instance_home + '/' + instance):
+            #os.system('%s' % (instance_home + '/' + instance + '/bin/zeoctl start'))
+            if plone_version == "2.1.4":
+                try:
+                    outfile = open(('%s' % (instance_home + '/' + instance + 
+                                            '/bin/addPloneSite.py')), 'wb')
+                    outfile.write(add_plone_site_2_1_4 % (zope_user, '/' + instance))
+                    outfile.close()
+                except:
+                    raise Exception
+                os.system('%s %s' % (
+                    instance_home + '/' + instance + '/bin/zopectl run',
+                    instance_home + '/' + instance + '/bin/addPloneSite.py'))
+            else:
+                try:
+                    outfile = open(('%s' % (instance_home + '/' + instance +
+                                            '/bin/addPloneSite.py')), 'wb')
+                    outfile.write(add_plone_site % (zope_user, instance))
+                    outfile.close()
+                except:
+                    raise Exception
+                os.system('%s %s' % (
+                    instance_home + '/' + instance + '/bin/zopectl run',
+                    instance_home + '/' + instance + '/bin/addPloneSite.py'))
+            return (0)
+        else:
+            return (2)
+
+def save_port(instance,zope_port):
+    try:
+        outfile = open(('%s' % (instance_home + '/' + instance + '/var/port.txt')), 'wb')
+    except:
+        raise Exception
+    outfile.write(zope_port)
+    outfile.close()
+
+def open_plone_site(instances):
+    for instance in instances:
+        try:
+            infile = open((instance_home + '/' + instance + '/var/port.txt'),'rb')
+            port = infile.read()
+            infile.close()
+        except:
+            raise Exception
+        os.system('open -a Firefox http://localhost:%s/%s' % (port, instance))
+
+def check_version_map(plone_version):
+    return version_map[plone_version]
+
+# This func from python cookbook, cb2_2_16_sol_1.py.
+def all_files(root, patterns='*', single_level=True, yield_folders=True):
+    # Expand patterns from semicolon-separated string to list
+    patterns = patterns.split(';')
+    for path, subdirs, files in os.walk(root):
+        if yield_folders:
+            files.extend(subdirs)
+        files.sort()
+        for name in files:
+            for pattern in patterns:
+                if fnmatch.fnmatch(name, pattern): 
+                    yield os.path.join(path, name)
+                    break
+        if single_level:
+            break
+
+def update_instance(args):
+    for instance in args:
+        print instance, '\n', separator
+        os.system('svn up %s' % (instance_home + '/' + instance))
+        print '\n'
+
+def update_repo(args):
+    for p in args:
+        print p, '\n', separator
+        os.system('svn up %s' % (products + 'archetypes/' + p))
+        print '\n'
+
+def check_root():
+    if (int(commands.getoutput('id -g %s' % os.getenv('USER'))) != 0):
+        return False
+    else:
+        return True
+
+def pack(args):
+    for instance in args:
+        try:
+            outfile = open(('%s' % (instance_home + '/' + instance + '/bin/pack.py')), 'wb')
+            outfile.write(pack_database % zope_user)
+            outfile.close()
+        except:
+            raise Exception
+        os.system('%s %s' % (   
+            instance_home + '/' + instance + '/bin/zopectl run',
+            instance_home + '/' + instance + '/bin/pack.py'))
+
+def usage():
+    print __doc__
+
+#===============================================================================
+
+def main(argv,plone_version,actions):
+    try:
+        opts, args = getopt.getopt(
+            argv, 'hlu', [
+                'add',
+                'backup',
+                'checkout=',
+                'cleanpyc',
+                'create',
+                'fg',
+                'help',
+                'link',
+                'list',
+                'list-repo=',
+                'list-products',
+                'open',
+                'pack',
+                'plone-version=', 
+                'remove',
+                'remove-module',
+                'restart',
+                'start',
+                'stop',
+                'update-instance',
+                'update-module',
+                ])
+
+    except getopt.GetoptError:
+        print 'Unknown option. Try -h.'
+        sys.exit(2)
+
+    #===========================================================================
+
+    for opt, arg in opts:
+        if opt in ('--add',):
+            actions['add_plone_site']           = True
+        if opt in ('--backup',):
+            actions['backup']                   = True
+        if opt in ('--checkout',):
+            actions['checkout']                 = True
+            repo=arg
+        if opt in ('--cleanpyc',):
+            actions['cleanpyc']                 = True
+        if opt in ('--create',):
+            actions['create']                   = True
+        if opt in ('--fg',):
+            actions['foreground']               = True
+        if opt in ('-h', '--help',):
+            usage()
+            sys.exit(0)
+        if opt in ('--link',):
+            actions['link']                     = True
+        if opt in ('--list',):
+            actions['list_instances']           = True
+        if opt in ('--list-repo',):
+            actions['list_repo']          = True
+            repo=arg
+        if opt in ('--list-products',):
+            actions['list_products']            = True
+        if opt in ('--open',):
+            actions['openbrowser']              = True
+        if opt in ('--pack',):
+            actions['pack']                     = True
+        if opt in ('--plone-version',):
+            plone_version=arg
+        if opt in ('--remove',):
+            actions['remove']                   = True
+        if opt in ('--remove-module',):
+            actions['remove_module']            = True
+        if opt in ('--restart',):
+            actions['restart']                  = True
+        if opt in ('--start',):
+            actions['start']                    = True
+        if opt in ('--stop',):
+            actions['stop']                     = True
+        if opt in ('--update-instance',):
+            actions['update_instance']          = True
+        if opt in ('--update-module',):
+            actions['update_module']        = True
+
+    #===========================================================================
+
+    if opts == []:
+        print 'Need an option. Try newzope -h'
+        sys.exit(2)
+    if actions['list_instances'] and args == []:
+        list_instances()
+        sys.exit(0)
+    if actions['list_products'] and args == []:
+        list_products()
+        sys.exit(0)
+    if actions['list_repo'] and args == []:
+        list_repo(repo)
+        sys.exit(0)
+    if actions['update_module'] and not args == []:
+        update_module(args)
+        sys.exit(0)
+    if actions['checkout'] and not args == []:
+        checkout(args, repo)
+        sys.exit(0)
+    if actions['update_instance'] and not args == []:
+        update_instance(args)
+        sys.exit(0)
+    if actions['openbrowser'] and not args == []:
+        open_plone_site(args)
+        sys.exit(0)
+    try:
+        check_version_map(plone_version)
+    except:
+        print 'Unknown plone version.'
+        sys.exit(2)
+    if actions['add_plone_site'] and (len(args) > 1):
+        print 'Need one instance.'
+        sys.exit(2)
+    if actions['add_plone_site'] and not args == []:
+        retval = addPloneSite(args,plone_version)
+        if retval == 0:
+            sys.exit(0)
+        else:
+            print 'No such instance.'
+            sys.exit(0)
+    if actions['backup'] and not args == []:
+        backup(args,plone_version)
+        sys.exit(0)
+    if actions['pack'] and not args == []:
+        pack(args)
+        sys.exit(0)
+    if actions['cleanpyc'] and args == []:
+        cleanpyc()
+        sys.exit(0)
+    if actions['create'] and not args == []:
+        for instance in args:
+            zope_port,zeo_port = getPortNumbers()
+            create_instance_zope(instance,plone_version, zeo_port)
+            create_instance_zeo(instance,plone_version, zeo_port)
+            config_instance(instance,plone_version, zope_port, zeo_port)
+            link_plone_products(instance,plone_version)
+            change_permissions(instance)
+            save_port(instance,zope_port)
+        sys.exit(0)
+    if actions['link'] and (len(args) > 1):
+        instance = args.pop(0)
+        for p in args:
+            link_addon_products(instance,p)
+        sys.exit(0)
+    if actions['foreground'] and (len(args) > 1):
+        print 'Need one instance.'
+        sys.exit(2)
+    if actions['foreground'] and not (len(args) > 1):
+        instance = args.pop(0) 
+        foreground_instance(instance)
+        sys.exit(0)
+    if actions['remove'] and not args == []:
+        for instance in args:
+            remove_instance(instance)
+        sys.exit(0)
+    if actions['remove_module'] and not args == []:
+        remove_module(args)
+        sys.exit(0)
+    if actions['restart'] and not args == []:
+        for instance in args:
+            restart_instance(instance)
+        sys.exit(0)
+    if actions['start'] and not args == []:
+        for instance in args:
+            start_instance(instance)
+        sys.exit(0)
+    if actions['stop'] and not args == []:
+        for instance in args:
+            stop_instance(instance)
+        sys.exit(0)
+    if actions['update_instance'] and not args == []:
+        update_instance(args)
+        sys.exit(0)
+    print 'Unknown option. Try -h.'
+    sys.exit(2)
+
+#===============================================================================
+
+if __name__ == "__main__":
+    main(sys.argv[1:], default_plone_version, actions)
+
