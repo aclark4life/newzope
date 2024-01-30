@@ -1461,7 +1461,6 @@ django-npm-build-default:
 	cd frontend; npm run build
 
 django-open-default:
-open:
 ifeq ($(UNAME), Linux)
 	@echo "Opening on Linux."
 	xdg-open http://0.0.0.0:8000
@@ -1835,6 +1834,7 @@ h-default: help
 init-default: wagtail-init
 install-default: pip-install
 install-dev-default: pip-install-dev
+install-test-default: pip-install-test
 i-default: install
 migrate-default: django-migrate
 migrations-default: django-migrations
