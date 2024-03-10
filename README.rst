@@ -5,7 +5,7 @@ This is the newzope "instance manager" for Plone, aimed at providing rapid proto
 
 If you don't like to fiddle, you should `use buildout <https://buildout.org>`_.
 
-See 'newzope -h' for more info.
+See ``newzope -h`` for more information.
 
 Installation
 ------------
