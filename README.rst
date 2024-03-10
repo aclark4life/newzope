@@ -1,7 +1,7 @@
 Newzope
 =======
 
-This is the newzope "instance manager" for Plone, aimed at providing rapid prototyping ability for those who like to fiddle. If you don't like to fiddle, you should `use buildout <https://buildout.org>`_.
+This is the newzope "instance manager" for Plone, aimed at providing rapid prototyping ability for those who like to fiddle. If you don't like to fiddle, you should probably `use buildout <https://buildout.org>`_.
 
 Installation
 ------------
