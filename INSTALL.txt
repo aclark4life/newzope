@@ -1,7 +1,0 @@
-
-Build instructions for newzope
-==============================
-
-This program uses distutils, so you can install it by running:
-    
-    % python setup.py install
